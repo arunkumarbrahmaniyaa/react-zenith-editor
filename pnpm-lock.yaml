@@ -65,9 +65,6 @@ importers:
       '@react-zenith-editor/core':
         specifier: workspace:*
         version: link:../core
-      lucide-react:
-        specifier: ^0.525.0
-        version: 0.525.0(react@18.3.1)
       react:
         specifier: ^18.0.0 || ^19.0.0
         version: 18.3.1
@@ -1689,14 +1686,6 @@ packages:
   /lru-cache@10.4.3:
     resolution: {integrity: sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==}
     dev: true
-
-  /lucide-react@0.525.0(react@18.3.1):
-    resolution: {integrity: sha512-Tm1txJ2OkymCGkvwoHt33Y2JpN5xucVq1slHcgE6Lk0WjDfjgKWor5CdVER8U6DvcfMwh4M8XxmpTiyzfmfDYQ==}
-    peerDependencies:
-      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
-    dependencies:
-      react: 18.3.1
-    dev: false
 
   /lz-string@1.5.0:
     resolution: {integrity: sha512-h5bgJWpxJNswbU7qCrV0tIKQCaS3blPDrqKWx+QxzuzL1zGUzij9XCWLrSLsJPu5t+eWA/ycetzYAO5IOMcWAQ==}

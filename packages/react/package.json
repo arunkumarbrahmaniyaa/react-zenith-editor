@@ -10,8 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@react-zenith-editor/core": "workspace:*",
-    "lucide-react": "^0.525.0"
+    "@react-zenith-editor/core": "workspace:*"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",

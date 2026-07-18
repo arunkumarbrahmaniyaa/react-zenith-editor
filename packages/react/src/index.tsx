@@ -35,8 +35,8 @@ import {
   Upload,
   Video,
   X
-} from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+} from './icons';
+import { useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
 export type ToolbarSection =
   | 'editing'
@@ -127,6 +127,20 @@ export type EditorProps = {
   value?: DocumentModel;
   placeholder?: string;
   onChange?: (value: DocumentModel) => void;
+  /** Controlled HTML value. When provided the editor content mirrors this string. */
+  html?: string;
+  /** Uncontrolled initial HTML content (used for edit mode / default values). */
+  defaultValue?: string;
+  /** Fired with the full HTML content whenever the editor content changes. */
+  onHtmlChange?: (html: string) => void;
+  /** Native blur handler so the editor behaves like a standard form control. */
+  onBlur?: React.FocusEventHandler<HTMLDivElement>;
+  /** Form field name. Renders a hidden input so native `<form>` submissions capture the value. */
+  name?: string;
+  /** Disables all editing and toolbar interaction. */
+  disabled?: boolean;
+  /** Makes the content read-only while keeping it selectable. */
+  readOnly?: boolean;
   toolbar?: ToolbarItem[];
   toolbarPosition?: ToolbarPosition;
   toolbarSticky?: boolean;
@@ -151,6 +165,41 @@ export type EditorProps = {
   onImageUpload?: (file: File) => Promise<string>;
   onVideoUpload?: (file: File) => Promise<string>;
 };
+
+/**
+ * Imperative handle exposed through a ref so parent components and forms can
+ * read/write the editor content, focus it, or clear it programmatically.
+ */
+export interface EditorHandle {
+  /** Returns the current HTML content of the editor. */
+  getHTML: () => string;
+  /** Replaces the editor content with the given HTML. */
+  setHTML: (html: string) => void;
+  /** Returns the current plain-text content of the editor. */
+  getText: () => string;
+  /** Moves focus into the editable area. */
+  focus: () => void;
+  /** Clears all content and emits an empty change. */
+  clear: () => void;
+  /** Whether the editor currently has no meaningful content. */
+  isEmpty: () => boolean;
+  /** The underlying contentEditable element (or null before mount). */
+  element: HTMLDivElement | null;
+}
+
+/** Strips markup/whitespace to determine whether HTML content is effectively empty. */
+function isHtmlContentEmpty(html: string): boolean {
+  if (!html) {
+    return true;
+  }
+  const withoutTags = html
+    .replace(/<br\s*\/?>(?=\s*<\/)/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[\u200B\u00A0]/g, '')
+    .trim();
+  return withoutTags.length === 0;
+}
 
 const DEFAULT_TOOLBAR: ToolbarItem[] = [
   'undo',
@@ -270,7 +319,6 @@ const FONT_FAMILIES: { label: string; value: string }[] = [
   { label: 'Bebas Neue', value: '"Bebas Neue", Oswald, sans-serif' },
   { label: 'PT Sans', value: '"PT Sans", Arial, sans-serif' },
   { label: 'PT Serif', value: '"PT Serif", Georgia, serif' },
-  { label: 'Playfair Display', value: '"Playfair Display", Georgia, serif' },
   { label: 'Cambria', value: 'Cambria, Georgia, serif' },
   { label: 'Bookman', value: '"Bookman Old Style", serif' },
   { label: 'Century Gothic', value: '"Century Gothic", "Apple Gothic", sans-serif' },
@@ -972,10 +1020,17 @@ function buildChecklistItemMarkup(text: string): string {
   );
 }
 
-export function Editor({
+export const Editor = React.forwardRef<EditorHandle, EditorProps>(function Editor({
   value,
   placeholder = 'Start writing...',
   onChange,
+  html,
+  defaultValue,
+  onHtmlChange,
+  onBlur,
+  name,
+  disabled = false,
+  readOnly = false,
   toolbar,
   toolbarPosition = 'top',
   toolbarSticky = false,
@@ -999,7 +1054,7 @@ export function Editor({
   allowedVideoTypes = DEFAULT_VIDEO_TYPES,
   onImageUpload,
   onVideoUpload
-}: EditorProps) {
+}: EditorProps, ref: React.ForwardedRef<EditorHandle>) {
   const [doc, setDoc] = useState<DocumentModel>(() => value ?? createDocument());
   const [isToolbarExpanded, setIsToolbarExpanded] = useState(true);
   const [fontFamily, setFontFamily] = useState('');
@@ -1026,6 +1081,7 @@ export function Editor({
   const selectedMediaRef = useRef<HTMLElement | null>(null);
   const editingAnchorRef = useRef<HTMLAnchorElement | null>(null);
   const resizeStateRef = useRef<{ startX: number; startWidth: number; el: HTMLElement } | null>(null);
+  const draggedTableRef = useRef<HTMLTableElement | null>(null);
   const tableResizeRef = useRef<
     | {
         type: 'col' | 'row' | 'table';
@@ -1042,6 +1098,105 @@ export function Editor({
     | null
   >(null);
   const isInternalChangeRef = useRef(false);
+
+  // ----- Form-field (HTML value) integration -------------------------------
+  // The editor acts as a controlled/uncontrolled form field over its HTML
+  // content whenever any HTML-related prop is supplied. Rich content lives in
+  // the contentEditable DOM, so a MutationObserver is the single source of
+  // truth for change notifications (covers typing, execCommand formatting,
+  // media/table insertion, drag-and-drop, etc.).
+  const isHtmlMode = html !== undefined || defaultValue !== undefined || onHtmlChange !== undefined || Boolean(name);
+  const onHtmlChangeRef = useRef(onHtmlChange);
+  const lastHtmlRef = useRef<string>(html ?? defaultValue ?? '');
+  const hiddenInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    onHtmlChangeRef.current = onHtmlChange;
+  });
+
+  const writeEditableHtml = (next: string) => {
+    const editable = editableRef.current;
+    if (!editable) {
+      return;
+    }
+    lastHtmlRef.current = next;
+    if (editable.innerHTML !== next) {
+      editable.innerHTML = next;
+    }
+    if (hiddenInputRef.current) {
+      hiddenInputRef.current.value = next;
+    }
+    setIsEditorEmpty(isHtmlContentEmpty(next));
+  };
+
+  // Seed initial content once (edit mode / default values).
+  useEffect(() => {
+    if (!isHtmlMode) {
+      return;
+    }
+    writeEditableHtml(html ?? defaultValue ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the DOM in sync with a controlled `html` value without disrupting the
+  // caret while the user is actively typing.
+  useEffect(() => {
+    if (!isHtmlMode || html === undefined) {
+      return;
+    }
+    const editable = editableRef.current;
+    if (!editable || editable === document.activeElement) {
+      return;
+    }
+    if (editable.innerHTML !== html) {
+      writeEditableHtml(html);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [html, isHtmlMode]);
+
+  // Emit HTML changes for every content mutation via a single observer.
+  useEffect(() => {
+    if (!isHtmlMode) {
+      return;
+    }
+    const editable = editableRef.current;
+    if (!editable || typeof MutationObserver === 'undefined') {
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      const current = editable.innerHTML;
+      if (current === lastHtmlRef.current) {
+        return;
+      }
+      lastHtmlRef.current = current;
+      if (hiddenInputRef.current) {
+        hiddenInputRef.current.value = current;
+      }
+      setIsEditorEmpty(isHtmlContentEmpty(current));
+      onHtmlChangeRef.current?.(current);
+    });
+    observer.observe(editable, { childList: true, subtree: true, characterData: true, attributes: true });
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHtmlMode]);
+
+  useImperativeHandle(
+    ref,
+    (): EditorHandle => ({
+      getHTML: () => editableRef.current?.innerHTML ?? '',
+      setHTML: (next: string) => writeEditableHtml(next),
+      getText: () => editableRef.current?.textContent ?? '',
+      focus: () => editableRef.current?.focus(),
+      clear: () => {
+        writeEditableHtml('');
+        onHtmlChangeRef.current?.('');
+      },
+      isEmpty: () => isHtmlContentEmpty(editableRef.current?.innerHTML ?? ''),
+      element: editableRef.current
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   useEffect(() => {
     if (value) {
@@ -1060,14 +1215,29 @@ export function Editor({
     // block structure, and the caret position on every keystroke.
     if (isInternalChangeRef.current) {
       isInternalChangeRef.current = false;
+      const tables = editable.querySelectorAll('table[data-rze-table-id]');
+      tables.forEach((table) => {
+        table.setAttribute('draggable', 'true');
+        (table as HTMLTableElement).style.cursor = 'move';
+      });
       setIsEditorEmpty((editable.textContent ?? '').trim().length === 0);
       return;
     }
 
-    const nextHtml = documentToInitialHtml(doc);
-    if (editable.innerHTML !== nextHtml) {
-      editable.innerHTML = nextHtml;
+    // In HTML form-field mode the rich content is owned by the HTML sync
+    // effects; never overwrite it from the plain-text DocumentModel.
+    if (!isHtmlMode) {
+      const nextHtml = documentToInitialHtml(doc);
+      if (editable.innerHTML !== nextHtml) {
+        editable.innerHTML = nextHtml;
+      }
     }
+
+    const tables = editable.querySelectorAll('table[data-rze-table-id]');
+    tables.forEach((table) => {
+      table.setAttribute('draggable', 'true');
+      (table as HTMLTableElement).style.cursor = 'move';
+    });
 
     setIsEditorEmpty((editable.textContent ?? '').trim().length === 0);
   }, [doc]);
@@ -1236,6 +1406,10 @@ export function Editor({
     insertHTMLAtCursor(generateTableMarkup(rows, columns, tableId));
 
     const table = editableRef.current?.querySelector(`[data-rze-table-id="${tableId}"]`);
+    if (table instanceof HTMLTableElement) {
+      table.setAttribute('draggable', 'true');
+      table.style.cursor = 'move';
+    }
     const firstCell = table?.querySelector('td');
     focusInsideElementStart(firstCell ?? null);
   };
@@ -1514,7 +1688,16 @@ export function Editor({
   };
 
   const applyInlineStyleToSelection = (styleProp: 'fontFamily' | 'fontSize', value: string) => {
-    focusEditor(false);
+    const editable = editableRef.current;
+    if (editable) {
+      editable.focus();
+    }
+
+    // Always restore the selection captured when the dropdown opened. A bare
+    // focus() can drop a collapsed caret inside the editor, which would make
+    // `focusEditor`'s conditional restore skip the real (ranged) selection and
+    // cause the style to apply to nothing.
+    restoreSavedSelection();
 
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
@@ -1905,6 +2088,43 @@ export function Editor({
   };
 
   const handleEditorDrop: React.DragEventHandler<HTMLDivElement> = (event) => {
+    const draggedTable = draggedTableRef.current;
+    const draggedTableId = event.dataTransfer?.getData('application/x-rze-table-id') || '';
+    if (draggedTable && draggedTableId) {
+      event.preventDefault();
+
+      const editable = editableRef.current;
+      if (!editable || !editable.contains(draggedTable)) {
+        draggedTableRef.current = null;
+        return;
+      }
+
+      const pointTarget = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+      let topLevelTarget: HTMLElement | null = pointTarget;
+      while (topLevelTarget && topLevelTarget.parentElement && topLevelTarget.parentElement !== editable) {
+        topLevelTarget = topLevelTarget.parentElement;
+      }
+
+      const tableUnderPointer = pointTarget?.closest('table[data-rze-table-id]') as HTMLTableElement | null;
+      if (tableUnderPointer === draggedTable) {
+        draggedTableRef.current = null;
+        return;
+      }
+
+      if (topLevelTarget && topLevelTarget !== draggedTable) {
+        const rect = topLevelTarget.getBoundingClientRect();
+        const placeBefore = event.clientY < rect.top + rect.height / 2;
+        editable.insertBefore(draggedTable, placeBefore ? topLevelTarget : topLevelTarget.nextSibling);
+      } else {
+        editable.appendChild(draggedTable);
+      }
+
+      draggedTableRef.current = null;
+      isInternalChangeRef.current = true;
+      setDoc((current) => ({ ...current }));
+      return;
+    }
+
     const files = event.dataTransfer?.files;
     if (!files || files.length === 0) {
       return;
@@ -1922,6 +2142,26 @@ export function Editor({
     } else {
       setUploadError(`Unsupported file type "${file.type || file.name}".`);
     }
+  };
+
+  const handleEditorDragStart: React.DragEventHandler<HTMLDivElement> = (event) => {
+    const target = event.target as HTMLElement;
+    const table = target.closest('table[data-rze-table-id]') as HTMLTableElement | null;
+    if (!table || !table.dataset.rzeTableId) {
+      draggedTableRef.current = null;
+      return;
+    }
+
+    draggedTableRef.current = table;
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('application/x-rze-table-id', table.dataset.rzeTableId);
+    }
+  };
+
+  const handleEditorDragEnd: React.DragEventHandler<HTMLDivElement> = () => {
+    draggedTableRef.current = null;
+    setIsDragging(false);
   };
 
   const updateMediaBox = (element: HTMLElement) => {
@@ -2101,6 +2341,14 @@ export function Editor({
     }
     const kind = detectTableResizeTarget(event);
     editable.style.cursor = kind === 'col' ? 'col-resize' : kind === 'row' ? 'row-resize' : kind === 'table' ? 'nwse-resize' : '';
+
+    // Keep the table draggable everywhere except when the pointer is over a
+    // resize edge/corner, so resizing and dragging never fight each other.
+    const targetEl = event.target as HTMLElement | null;
+    const table = targetEl?.closest('table[data-rze-table-id]') as HTMLTableElement | null;
+    if (table) {
+      table.draggable = kind === null;
+    }
   };
 
   const handleTablePointerDown: React.PointerEventHandler<HTMLDivElement> = (event) => {
@@ -2117,6 +2365,8 @@ export function Editor({
       return;
     }
     event.preventDefault();
+    // Disable native drag during a resize so the pointer gesture is not hijacked.
+    table.draggable = false;
 
     if (kind === 'table') {
       const cols = ensureTableColumns(table);
@@ -2196,6 +2446,8 @@ export function Editor({
       if (editableRef.current) {
         editableRef.current.style.cursor = '';
       }
+      // Restore native dragging so the table can be moved anywhere after resizing.
+      table.draggable = true;
       isInternalChangeRef.current = true;
       setDoc((current) => ({ ...current }));
     };
@@ -2430,7 +2682,12 @@ export function Editor({
   };
 
   const toolbarNode = (
-    <div aria-label="Editor toolbar" role="toolbar" className="rze-toolbar rze-no-print" style={toolbarBaseStyle}>
+    <div
+      aria-label="Editor toolbar"
+      role="toolbar"
+      className="rze-toolbar rze-no-print"
+      style={disabled || readOnly ? { ...toolbarBaseStyle, pointerEvents: 'none', opacity: 0.55 } : toolbarBaseStyle}
+    >
       <input
         ref={imageFileInputRef}
         aria-label="Upload image file"
@@ -2842,18 +3099,37 @@ export function Editor({
     <div ref={canvasWrapperRef} style={{ position: 'relative' }}>
       <div
         ref={editableRef}
-        contentEditable
+        contentEditable={disabled || readOnly ? false : true}
         suppressContentEditableWarning
         className="rze-content"
+        role="textbox"
+        aria-multiline="true"
+        aria-readonly={disabled || readOnly ? true : undefined}
+        aria-disabled={disabled ? true : undefined}
         onInput={applyInput}
         onClick={handleEditorClick}
+        onDragStart={handleEditorDragStart}
+        onDragEnd={handleEditorDragEnd}
         onPointerDown={handleTablePointerDown}
         onPointerMove={handleTableHoverMove}
         onDrop={handleEditorDrop}
         onDragOver={(event) => {
-          event.preventDefault();
-          if (!isDragging) {
-            setIsDragging(true);
+          const draggingTable = Boolean(draggedTableRef.current);
+          if (draggingTable) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+            if (isDragging) {
+              setIsDragging(false);
+            }
+            return;
+          }
+
+          const hasFiles = Array.from(event.dataTransfer?.types ?? []).includes('Files');
+          if (hasFiles) {
+            event.preventDefault();
+            if (!isDragging) {
+              setIsDragging(true);
+            }
           }
         }}
         onDragLeave={(event) => {
@@ -2866,6 +3142,7 @@ export function Editor({
             placeCaretAtEnd();
           }
         }}
+        onBlur={onBlur}
         onKeyDown={(event) => {
           if (handleCodeBlockKeyDown(event)) {
             return;
@@ -3093,6 +3370,201 @@ export function Editor({
         {canvasNode}
         {toolbarPosition === 'bottom' ? toolbarNode : null}
       </div>
+      {name ? <input ref={hiddenInputRef} type="hidden" name={name} defaultValue={html ?? defaultValue ?? ''} /> : null}
     </div>
   );
+});
+
+Editor.displayName = 'Editor';
+
+/** Imperative handle exposed by {@link RichTextField}. */
+export interface RichTextFieldHandle {
+  /** Focus the editor. */
+  focus: () => void;
+  /** Clear the content and emit an empty change. */
+  clear: () => void;
+  /** Read the current HTML value. */
+  getHTML: () => string;
+  /** Replace the current HTML value. */
+  setHTML: (html: string) => void;
+  /** Whether the field is currently empty. */
+  isEmpty: () => boolean;
+  /** Run validation now, mark the field as touched, and return the error (if any). */
+  validate: () => string | undefined;
 }
+
+export interface RichTextFieldProps {
+  /** Form field name (also renders a hidden input for native form submission). */
+  name?: string;
+  /** Field label. A required marker is appended automatically when `required`. */
+  label?: React.ReactNode;
+  /** Controlled HTML value. Omit for uncontrolled usage. */
+  value?: string;
+  /** Initial HTML value for uncontrolled usage / edit mode. */
+  defaultValue?: string;
+  /** Change handler receiving the full HTML string. */
+  onChange?: (html: string) => void;
+  /** Blur handler (marks the field touched for validation). */
+  onBlur?: React.FocusEventHandler<HTMLDivElement>;
+  placeholder?: string;
+  /** Marks the field required and validates non-empty content. */
+  required?: boolean;
+  /** Message shown when a required field is empty. */
+  requiredMessage?: string;
+  disabled?: boolean;
+  readOnly?: boolean;
+  /** Externally-controlled error message (e.g. from React Hook Form / Formik). Takes precedence over built-in validation. */
+  error?: string;
+  /** Helper text shown when there is no error. */
+  helperText?: React.ReactNode;
+  /** Custom validator returning an error message, or `undefined` when valid. */
+  validate?: (html: string) => string | undefined;
+  id?: string;
+  className?: string;
+  style?: React.CSSProperties;
+  labelStyle?: React.CSSProperties;
+  errorStyle?: React.CSSProperties;
+  /** Pass-through configuration for the underlying editor (toolbar, upload handlers, theme, etc.). */
+  editorProps?: Omit<
+    EditorProps,
+    'value' | 'onChange' | 'html' | 'defaultValue' | 'onHtmlChange' | 'onBlur' | 'name' | 'disabled' | 'readOnly' | 'placeholder'
+  >;
+}
+
+/**
+ * A production-ready, reusable rich-text form field.
+ *
+ * - Works controlled (`value` + `onChange`) or uncontrolled (`defaultValue`).
+ * - Supports add mode (empty/default content) and edit mode (pre-populated).
+ * - Exposes `value`, `onChange`, `onBlur`, `name`, and a `ref` so it behaves
+ *   like a native form control and integrates with React Hook Form, Formik, or
+ *   plain `<form>` elements.
+ * - Handles required/custom validation, disabled/read-only states, labels,
+ *   helper text, and accessible error messaging.
+ */
+export const RichTextField = React.forwardRef<RichTextFieldHandle, RichTextFieldProps>(function RichTextField(
+  {
+    name,
+    label,
+    value,
+    defaultValue,
+    onChange,
+    onBlur,
+    placeholder,
+    required = false,
+    requiredMessage = 'This field is required.',
+    disabled = false,
+    readOnly = false,
+    error,
+    helperText,
+    validate,
+    id,
+    className,
+    style,
+    labelStyle,
+    errorStyle,
+    editorProps
+  },
+  ref
+) {
+  const isControlled = value !== undefined;
+  const [internalValue, setInternalValue] = useState<string>(defaultValue ?? '');
+  const [touched, setTouched] = useState(false);
+  const editorRef = useRef<EditorHandle>(null);
+
+  const currentValue = isControlled ? (value ?? '') : internalValue;
+  const generatedId = React.useId();
+  const fieldId = id ?? generatedId;
+  const errorId = `${fieldId}-error`;
+  const helperId = `${fieldId}-helper`;
+
+  const runValidation = (html: string): string | undefined => {
+    if (required && isHtmlContentEmpty(html)) {
+      return requiredMessage;
+    }
+    return validate?.(html);
+  };
+
+  const validationError = touched ? runValidation(currentValue) : undefined;
+  const displayError = error ?? validationError;
+
+  const handleChange = (html: string) => {
+    if (!isControlled) {
+      setInternalValue(html);
+    }
+    onChange?.(html);
+  };
+
+  const handleBlur: React.FocusEventHandler<HTMLDivElement> = (event) => {
+    setTouched(true);
+    onBlur?.(event);
+  };
+
+  useImperativeHandle(
+    ref,
+    (): RichTextFieldHandle => ({
+      focus: () => editorRef.current?.focus(),
+      clear: () => editorRef.current?.clear(),
+      getHTML: () => editorRef.current?.getHTML() ?? '',
+      setHTML: (html: string) => editorRef.current?.setHTML(html),
+      isEmpty: () => editorRef.current?.isEmpty() ?? true,
+      validate: () => {
+        setTouched(true);
+        return runValidation(editorRef.current?.getHTML() ?? currentValue);
+      }
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentValue, required, requiredMessage, validate]
+  );
+
+  return (
+    <div className={className} style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%', ...style }}>
+      {label ? (
+        <label
+          htmlFor={fieldId}
+          style={{ fontSize: 13, fontWeight: 600, color: disabled ? '#9ca3af' : '#374151', ...labelStyle }}
+        >
+          {label}
+          {required ? (
+            <span aria-hidden="true" style={{ color: '#dc2626', marginLeft: 4 }}>
+              *
+            </span>
+          ) : null}
+        </label>
+      ) : null}
+
+      <div
+        id={fieldId}
+        style={{
+          borderRadius: 8,
+          boxShadow: displayError ? '0 0 0 1px #dc2626' : undefined,
+          opacity: disabled ? 0.7 : 1
+        }}
+      >
+        <Editor
+          ref={editorRef}
+          name={name}
+          placeholder={placeholder}
+          disabled={disabled}
+          readOnly={readOnly}
+          onBlur={handleBlur}
+          onHtmlChange={handleChange}
+          {...(isControlled ? { html: currentValue } : { defaultValue: defaultValue ?? '' })}
+          {...editorProps}
+        />
+      </div>
+
+      {displayError ? (
+        <span id={errorId} role="alert" style={{ fontSize: 12, color: '#dc2626', ...errorStyle }}>
+          {displayError}
+        </span>
+      ) : helperText ? (
+        <span id={helperId} style={{ fontSize: 12, color: '#6b7280' }}>
+          {helperText}
+        </span>
+      ) : null}
+    </div>
+  );
+});
+
+RichTextField.displayName = 'RichTextField';
