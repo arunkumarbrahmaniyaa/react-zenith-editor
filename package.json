@@ -1,0 +1,28 @@
+{
+  "name": "react-zenith-editor-monorepo",
+  "private": true,
+  "packageManager": "pnpm@8.15.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/* build",
+    "test": "node -r ./test-setup.cjs ./node_modules/vitest/vitest.mjs run",
+    "dev": "pnpm --filter react-zenith-editor-example-basic dev"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitest/coverage-v8": "^2.1.4",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "jsdom": "^25.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsup": "^8.1.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

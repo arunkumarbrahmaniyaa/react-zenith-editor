@@ -1,0 +1,20 @@
+{
+  "name": "react-zenith-editor",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.tsx",
+  "module": "./src/index.tsx",
+  "types": "./src/index.tsx",
+  "scripts": {
+    "build": "tsup src/index.tsx --format esm,cjs --dts --out-dir dist --external react --external react-dom",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@react-zenith-editor/core": "workspace:*",
+    "lucide-react": "^0.525.0"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  }
+}
